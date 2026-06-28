@@ -1,0 +1,215 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+env:
+  RUST_BACKTRACE: 1
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Install just
+        run: |
+          cargo install just --version 1.36.0 || echo "just already installed"
+
+      - name: Check formatting
+        run: just fmt-check
+
+      - name: Run linting
+        run: just lint
+
+      - name: Run tests
+        run: just test
+
+      - name: Build release
+        run: just build-release
+
+  security-audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+          key: ${{ runner.os }}-cargo-audit-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-audit-
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --version 0.22.1 || echo "cargo-audit already installed"
+
+      - name: Generate lockfile
+        # Cargo.lock is not committed (this is a library crate), so generate one
+        # for cargo-audit to scan.
+        run: cargo generate-lockfile
+
+      - name: Run security audit
+        run: cargo audit
+
+  notify:
+    name: Notify Status
+    runs-on: ubuntu-latest
+    needs: [test, security-audit]
+    if: always()
+
+    steps:
+      - name: Send Discord notification
+        # All GitHub context is passed via env (NOT interpolated into the script
+        # body) so attacker-controllable strings like commit messages cannot
+        # break the JSON or inject shell. The payload is assembled with jq,
+        # which escapes everything safely.
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          EVENT_NAME: ${{ github.event_name }}
+          REPO: ${{ github.repository }}
+          BRANCH: ${{ github.head_ref || github.ref_name }}
+          COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          PUSH_MSG: ${{ github.event.head_commit.message }}
+          PUSH_AUTHOR: ${{ github.event.head_commit.author.name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          ACTOR: ${{ github.actor }}
+          SERVER_URL: ${{ github.server_url }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TIMESTAMP: ${{ github.event.head_commit.timestamp }}
+          TEST_RESULT: ${{ needs.test.result }}
+          AUDIT_RESULT: ${{ needs.security-audit.result }}
+        run: |
+          # Skip if webhook is not configured, or on forks
+          if [[ -z "$DISCORD_WEBHOOK" ]]; then
+            echo "⏭️ Discord webhook not configured, skipping notification"
+            exit 0
+          fi
+          if [[ "$REPO" != "tixena/os-shim" ]]; then
+            echo "⏭️ Skipping Discord notification (repository is $REPO, not tixena/os-shim)"
+            exit 0
+          fi
+
+          icon() { case "$1" in success) printf '✅';; failure) printf '❌';; *) printf '⏭️';; esac; }
+
+          # Overall status (job-level results from `needs`)
+          if [[ "$TEST_RESULT" == "success" && "$AUDIT_RESULT" == "success" ]]; then
+            JOB_STATUS="success"
+            TITLE="🎉 os-shim CI — Success"
+            DESC="All checks passed successfully!"
+            COLOR=3066993
+            BTN_STYLE=5; BTN_LABEL="View Build"
+            CONTENT=""
+          else
+            JOB_STATUS="failure"
+            TITLE="🚨 os-shim CI — Failure"
+            DESC="Build, tests, or the security audit failed!"
+            COLOR=16711680
+            BTN_STYLE=5; BTN_LABEL="View Failed Build"
+            CONTENT="@here"
+          fi
+
+          # Branch emoji (master/main vs feature branch)
+          if [[ "$BRANCH" == "master" || "$BRANCH" == "main" ]]; then
+            BRANCH_DISP="✅ $BRANCH"
+          else
+            BRANCH_DISP="🔧 $BRANCH"
+          fi
+
+          # Per-event details: commit message / author / PR link
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            COMMIT_MSG="$PR_TITLE"
+            AUTHOR="${PR_AUTHOR:-$ACTOR}"
+            PR_MD="[#${PR_NUMBER}: ${PR_TITLE}](${PR_URL})"
+          else
+            COMMIT_MSG=$(printf '%s' "$PUSH_MSG" | head -n1)
+            AUTHOR="${PUSH_AUTHOR:-$ACTOR}"
+            PR_MD=""
+          fi
+          [[ -z "$COMMIT_MSG" ]] && COMMIT_MSG="(no message)"
+          SHORT_SHA="${COMMIT_SHA:0:7}"
+          COMMIT_MD="[\`${SHORT_SHA}\`](${SERVER_URL}/${REPO}/commit/${COMMIT_SHA})"
+
+          # Assemble the payload with jq (safe escaping of all dynamic strings)
+          PAYLOAD=$(jq -n \
+            --arg content "$CONTENT" \
+            --arg title "$TITLE" --arg desc "$DESC" --argjson color "$COLOR" \
+            --arg repo "$REPO" --arg branch "$BRANCH_DISP" --arg author "$AUTHOR" \
+            --arg commit "$COMMIT_MD" --arg msg "$COMMIT_MSG" --arg pr "$PR_MD" \
+            --arg test "$(icon "$TEST_RESULT")" --arg audit "$(icon "$AUDIT_RESULT")" \
+            --arg ts "$TIMESTAMP" \
+            --arg run_url "$RUN_URL" --argjson btn_style "$BTN_STYLE" --arg btn_label "$BTN_LABEL" \
+            '{
+              content: $content,
+              embeds: [
+                ({
+                  title: $title,
+                  description: $desc,
+                  color: $color,
+                  fields: (
+                    [ {name: "Repository", value: $repo, inline: true},
+                      {name: "Branch", value: $branch, inline: true},
+                      {name: "Author", value: $author, inline: true},
+                      {name: "Commit", value: ($commit + "  " + $msg), inline: false} ]
+                    + (if $pr != "" then [ {name: "Pull Request", value: $pr, inline: false} ] else [] end)
+                    + [ {name: "🧪 Tests & Build", value: $test, inline: true},
+                        {name: "🛡️ Security Audit", value: $audit, inline: true} ]
+                  ),
+                  footer: {text: "os-shim CI"}
+                } + (if $ts != "" then {timestamp: $ts} else {} end))
+              ],
+              components: [
+                {type: 1, components: [ {type: 2, style: $btn_style, label: $btn_label, url: $run_url} ]}
+              ]
+            }')
+
+          echo "Sending Discord notification..."
+          echo "Job Status: $JOB_STATUS"
+
+          RESPONSE=$(curl -s -w "HTTPSTATUS:%{http_code}" -H "Content-Type: application/json" -d "$PAYLOAD" "$DISCORD_WEBHOOK")
+          HTTP_STATUS=$(echo "$RESPONSE" | tr -d '\n' | sed -e 's/.*HTTPSTATUS://')
+
+          if [[ $HTTP_STATUS -eq 200 || $HTTP_STATUS -eq 204 ]]; then
+            echo "✅ Discord notification sent successfully (HTTP $HTTP_STATUS)"
+          else
+            echo "❌ Discord notification failed (HTTP $HTTP_STATUS)"
+            echo "Response: $RESPONSE"
+          fi
