@@ -588,6 +588,35 @@ fn parity_remove_dir_all_missing_is_not_found() {
     );
 }
 
+/// `remove_dir_all` on a populated tree evicts the root and every descendant on
+/// both impls. The missing-path case only exercises the early `NotFound` return;
+/// this pins the actual subtree-removal path where Mock could silently diverge.
+#[test]
+fn parity_remove_dir_all_removes_populated_tree() {
+    let real = RealSystem::new();
+    let tmp = real.create_temp_dir().unwrap();
+    let real_root = tmp.path().join("tree");
+    populate(&real, &real_root);
+
+    let mock = MockSystem::new();
+    let mock_root = Path::new("/work/tree");
+    populate(&mock, mock_root);
+
+    real.remove_dir_all(&real_root).unwrap();
+    mock.remove_dir_all(mock_root).unwrap();
+
+    assert!(!real.exists(&real_root).unwrap());
+    assert!(!mock.exists(mock_root).unwrap());
+    for relative in ["alpha.txt", "empty.txt", "sub", "sub/beta.txt"] {
+        assert_eq!(
+            real.exists(&real_root.join(relative)).unwrap(),
+            mock.exists(&mock_root.join(relative)).unwrap(),
+            "mock/real disagree on {relative:?} after remove_dir_all"
+        );
+        assert!(!mock.exists(&mock_root.join(relative)).unwrap());
+    }
+}
+
 /// `walk_dir` on a missing path: both yield an empty list (converged; Mock used
 /// to return `NotFound` -- shim-977).
 #[test]
