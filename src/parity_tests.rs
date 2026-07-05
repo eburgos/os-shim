@@ -608,37 +608,87 @@ fn parity_walk_dir_missing_yields_empty() {
     );
 }
 
-/// `hidden = true` excludes dotfiles on both (converged; Mock used to ignore the
-/// flag -- shim-977).
+/// The `hidden` flag honors its documented meaning on both impls: `true`
+/// includes dotfiles, `false` excludes them (converged; Mock used to ignore the
+/// flag and both impls used the inverse semantics -- shim-977).
 #[test]
-fn parity_walk_dir_hidden_flag_excludes_dotfiles() {
+fn parity_walk_dir_hidden_flag_includes_dotfiles() {
     let real = RealSystem::new();
     let tmp = real.create_temp_dir().unwrap();
     real.write(&tmp.path().join("visible.txt"), b"v").unwrap();
     real.write(&tmp.path().join(".secret"), b"s").unwrap();
-    let real_names = relative_names(
-        &real
-            .walk_dir(tmp.path(), false, true)
-            .unwrap()
-            .into_iter()
-            .map(|entry| entry.path)
-            .collect::<Vec<_>>(),
-        tmp.path(),
-    );
 
     let mock = MockSystem::new().with_dir("/work").unwrap();
     mock.write(Path::new("/work/visible.txt"), b"v").unwrap();
     mock.write(Path::new("/work/.secret"), b"s").unwrap();
-    let mock_names = relative_names(
-        &mock
-            .walk_dir(Path::new("/work"), false, true)
-            .unwrap()
-            .into_iter()
-            .map(|entry| entry.path)
-            .collect::<Vec<_>>(),
-        Path::new("/work"),
-    );
 
-    assert_eq!(real_names, mock_names);
-    assert_eq!(real_names, vec!["visible.txt"]);
+    let walk_names = |hidden: bool| {
+        let real_names = relative_names(
+            &real
+                .walk_dir(tmp.path(), false, hidden)
+                .unwrap()
+                .into_iter()
+                .map(|entry| entry.path)
+                .collect::<Vec<_>>(),
+            tmp.path(),
+        );
+        let mock_names = relative_names(
+            &mock
+                .walk_dir(Path::new("/work"), false, hidden)
+                .unwrap()
+                .into_iter()
+                .map(|entry| entry.path)
+                .collect::<Vec<_>>(),
+            Path::new("/work"),
+        );
+        assert_eq!(real_names, mock_names);
+        real_names
+    };
+
+    // hidden = true includes the dotfile; hidden = false excludes it.
+    assert_eq!(walk_names(true), vec![".secret", "visible.txt"]);
+    assert_eq!(walk_names(false), vec!["visible.txt"]);
+}
+
+/// `follow_links` is a faithful no-op on the mock (no symlink modeling). On a
+/// symlink-free tree both impls yield identical entries for either flag value,
+/// so mock and real agree -- shim-977.
+#[test]
+fn parity_walk_dir_follow_links_agrees_without_symlinks() {
+    let real = RealSystem::new();
+    let tmp = real.create_temp_dir().unwrap();
+    populate(&real, tmp.path());
+
+    let mock = MockSystem::new();
+    populate(&mock, Path::new("/work"));
+
+    let walk_names = |follow_links: bool| {
+        let real_names = relative_names(
+            &real
+                .walk_dir(tmp.path(), follow_links, false)
+                .unwrap()
+                .into_iter()
+                .map(|entry| entry.path)
+                .collect::<Vec<_>>(),
+            tmp.path(),
+        );
+        let mock_names = relative_names(
+            &mock
+                .walk_dir(Path::new("/work"), follow_links, false)
+                .unwrap()
+                .into_iter()
+                .map(|entry| entry.path)
+                .collect::<Vec<_>>(),
+            Path::new("/work"),
+        );
+        assert_eq!(real_names, mock_names);
+        real_names
+    };
+
+    // Both flag values yield the same tree on both impls.
+    assert_eq!(walk_names(true), walk_names(false));
+    assert_eq!(
+        walk_names(false),
+        vec!["alpha.txt", "empty.txt", "sub", "sub/beta.txt"]
+    );
 }

@@ -268,7 +268,9 @@ pub trait System: Send + Sync {
     /// # Arguments
     /// * `path` - Root path to start walking from.
     /// * `follow_links` - Whether to follow symbolic links.
-    /// * `hidden` - Whether to include hidden files.
+    /// * `hidden` - Whether to include hidden (dot-prefixed) entries. `true`
+    ///   includes them; `false` excludes any entry under a dot-prefixed path
+    ///   component.
     ///
     /// # Returns
     /// Vector of all entries found (files and directories), excluding the root itself.

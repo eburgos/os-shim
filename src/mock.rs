@@ -646,7 +646,10 @@ impl System for MockSystem {
     fn walk_dir(
         &self,
         path: &Path,
-        // `follow_links` is a no-op: the mock has no symlinks. Kept to match the trait.
+        // `follow_links` is a faithful no-op: neither the mock filesystem nor the
+        // System trait models symlinks, so a symlink-free tree walks identically
+        // for both flag values -- which is exactly what RealSystem does when no
+        // symlinks are present. Kept to match the trait signature.
         _follow_links: bool,
         hidden: bool,
     ) -> io::Result<Vec<WalkEntry>> {
@@ -704,9 +707,9 @@ impl System for MockSystem {
             }
         }
 
-        // Match RealSystem's `hidden` semantics (ignore::WalkBuilder::hidden): when
-        // set, exclude any entry living under a dot-prefixed path component.
-        if hidden {
+        // Honor the trait's `hidden` semantics: `true` includes hidden entries,
+        // `false` excludes any entry living under a dot-prefixed path component.
+        if !hidden {
             entries.retain(|entry| {
                 entry.path.strip_prefix(path).is_ok_and(|rel| {
                     !rel.components()

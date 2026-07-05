@@ -402,12 +402,11 @@ fn walk_dir_includes_nested_entries() {
     assert_eq!(names, vec!["sub", "sub/inner.txt", "top.txt"]);
 }
 
-// The `hidden` flag is forwarded to `ignore::WalkBuilder::hidden`, where `true`
-// means "ignore hidden files". So `hidden = true` EXCLUDES dotfiles and
-// `hidden = false` INCLUDES them -- the inverse of the parameter's name. These
-// two tests pin that observed behavior. See shim issue on the inverted flag.
+// `hidden` honors the trait's documented meaning: `true` INCLUDES dotfiles and
+// `false` EXCLUDES them. RealSystem achieves this by forwarding `!hidden` to
+// `ignore::WalkBuilder::hidden` (whose `true` excludes hidden files).
 #[test]
-fn walk_dir_hidden_true_excludes_dotfiles() {
+fn walk_dir_hidden_true_includes_dotfiles() {
     let system = RealSystem::new();
     let tmp = system.create_temp_dir().unwrap();
     let root = tmp.path();
@@ -416,11 +415,11 @@ fn walk_dir_hidden_true_excludes_dotfiles() {
     system.write(&root.join(".secret"), b"s").unwrap();
 
     let names = relative_walk_names(system, root, false, true);
-    assert_eq!(names, vec!["visible.txt"]);
+    assert_eq!(names, vec![".secret", "visible.txt"]);
 }
 
 #[test]
-fn walk_dir_hidden_false_includes_dotfiles() {
+fn walk_dir_hidden_false_excludes_dotfiles() {
     let system = RealSystem::new();
     let tmp = system.create_temp_dir().unwrap();
     let root = tmp.path();
@@ -429,7 +428,7 @@ fn walk_dir_hidden_false_includes_dotfiles() {
     system.write(&root.join(".secret"), b"s").unwrap();
 
     let names = relative_walk_names(system, root, false, false);
-    assert_eq!(names, vec![".secret", "visible.txt"]);
+    assert_eq!(names, vec!["visible.txt"]);
 }
 
 #[test]
