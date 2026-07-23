@@ -123,8 +123,8 @@ jobs:
             echo "⏭️ Discord webhook not configured, skipping notification"
             exit 0
           fi
-          if [[ "$REPO" != "tixena/os-shim" ]]; then
-            echo "⏭️ Skipping Discord notification (repository is $REPO, not tixena/os-shim)"
+          if [[ "$REPO" != "eburgos/os-shim" && "$REPO" != "tixena/os-shim" ]]; then
+            echo "⏭️ Skipping Discord notification (repository is $REPO, a fork)"
             exit 0
           fi
 
