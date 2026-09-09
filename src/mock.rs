@@ -15,6 +15,8 @@
 
 use tracing::error;
 
+#[cfg(feature = "zip")]
+use crate::archive::load_zip;
 use crate::{FileMetadata, System, TempDirHandle, WalkEntry};
 use std::collections::{BTreeMap, BTreeSet};
 use std::env::VarError;
@@ -91,6 +93,24 @@ impl MemorySystem {
             dirs.insert(ancestor);
         }
         dirs.insert(path.to_path_buf());
+    }
+
+    /// Build a `MemorySystem` whose filesystem is the contents of a zip archive.
+    ///
+    /// Entries land under `/`, so archiving a folder and loading it back gives an
+    /// in-memory filesystem holding that folder's contents at the root. The reader
+    /// need not be seekable.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The archive is malformed, or an entry cannot be written.
+    #[cfg(feature = "zip")]
+    #[inline]
+    pub fn from_zip_stream(source: &mut dyn Read) -> io::Result<Self> {
+        let system = Self::new();
+        load_zip(&system, source, Path::new("/"))?;
+        Ok(system)
     }
 
     /// Create a new `MemorySystem` with default state.
@@ -860,6 +880,12 @@ impl TempDirHandle for MemoryTempDir {
     #[inline]
     fn path(&self) -> &Path {
         &self.path
+    }
+
+    #[cfg(feature = "zip")]
+    #[inline]
+    fn to_zip_stream(&self) -> io::Result<Box<dyn Read>> {
+        self.system.to_zip_stream(&self.path)
     }
 }
 

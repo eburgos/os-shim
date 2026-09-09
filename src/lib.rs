@@ -28,6 +28,10 @@
     reason = "trait name System is the canonical name for this abstraction"
 )]
 
+extern crate alloc;
+
+#[cfg(feature = "zip")]
+pub mod archive;
 pub mod mock;
 pub mod real;
 
@@ -82,6 +86,25 @@ pub struct FileMetadata {
 pub trait TempDirHandle {
     /// Get the path to the temporary directory.
     fn path(&self) -> &Path;
+
+    /// A pull-based zip stream of this directory's contents.
+    ///
+    /// The default body reports `Unsupported`, so an out-of-crate implementor
+    /// keeps compiling; `RealSystem` and `MemorySystem` both override it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The implementation does not support archiving itself.
+    /// - The directory cannot be read.
+    #[cfg(feature = "zip")]
+    #[inline]
+    fn to_zip_stream(&self) -> io::Result<Box<dyn Read>> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "this temporary directory handle cannot archive itself",
+        ))
+    }
 }
 
 /// Unified trait for system operations (environment + filesystem).
@@ -262,6 +285,51 @@ pub trait System: Send + Sync {
 
     /// Set an environment variable.
     fn set_env_var(&self, key: &str, value: &str);
+
+    /// A pull-based zip stream of `source`, held in memory.
+    ///
+    /// Provided method: implementors get it for free.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The source cannot be read.
+    #[cfg(feature = "zip")]
+    #[inline]
+    fn to_zip_stream(&self, source: &Path) -> io::Result<Box<dyn Read>> {
+        Ok(Box::new(io::Cursor::new(self.to_zip_vec(source)?)))
+    }
+
+    /// The zip archive of `source` as bytes.
+    ///
+    /// Provided method: implementors get it for free.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The source cannot be read.
+    #[cfg(feature = "zip")]
+    #[inline]
+    fn to_zip_vec(&self, source: &Path) -> io::Result<Vec<u8>> {
+        let mut bytes = Vec::new();
+        self.to_zip_writer(source, &mut bytes)?;
+        Ok(bytes)
+    }
+
+    /// Write `source` into `sink` as a zip archive.
+    ///
+    /// A directory contributes its *contents*: archiving `A/` yields `file.txt`,
+    /// not `A/file.txt`. Provided method: implementors get it for free.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The source cannot be read, or the sink cannot be written.
+    #[cfg(feature = "zip")]
+    #[inline]
+    fn to_zip_writer(&self, source: &Path, sink: &mut dyn Write) -> io::Result<()> {
+        archive::to_zip_writer(self, source, sink, archive::ZipOptions::default())
+    }
 
     /// Recursively walk a directory, returning all entries.
     ///

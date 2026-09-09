@@ -211,6 +211,12 @@ impl TempDirHandle for RealTempDir {
     fn path(&self) -> &Path {
         self.inner.path()
     }
+
+    #[cfg(feature = "zip")]
+    #[inline]
+    fn to_zip_stream(&self) -> io::Result<Box<dyn Read>> {
+        RealSystem::new().to_zip_stream(self.inner.path())
+    }
 }
 
 #[cfg(test)]
