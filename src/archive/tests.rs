@@ -12,6 +12,13 @@ use time::OffsetDateTime;
 use zip::ZipArchive;
 use zip::write::{SimpleFileOptions, ZipWriter};
 
+/// Bytes a local file header occupies ahead of its variable-length file name.
+const LOCAL_HEADER_FIXED_BYTES: usize = 30;
+
+/// The four bytes opening a zip64 extended information extra field: header id
+/// `0x0001` and a sixteen-byte payload length, each little-endian.
+const ZIP64_EXTRA_FIELD_HEADER: [u8; 4] = [0x01, 0x00, 0x10, 0x00];
+
 /// A `System` implementor writing only the methods the trait required before the
 /// zip methods arrived, proving an out-of-crate implementor gains them for free.
 struct MinimalSystem {
@@ -158,6 +165,26 @@ fn entry_year(archive: &[u8], name: &str) -> u16 {
         .last_modified()
         .unwrap()
         .year()
+}
+
+/// The extra field bytes carried by the *local* header of the entry named `name`.
+///
+/// The reader strips a zip64 extra field out of the field it hands back, so the
+/// bytes are cut from the archive itself, between the end of the local header's
+/// file name and the start of the entry's data.
+fn local_extra_field(archive: &[u8], name: &str) -> Vec<u8> {
+    let mut reader = ZipArchive::new(Cursor::new(archive.to_vec())).unwrap();
+    let entry = reader.by_name(name).unwrap();
+    let extra_start = usize::try_from(entry.header_start())
+        .unwrap()
+        .checked_add(LOCAL_HEADER_FIXED_BYTES)
+        .and_then(|offset| offset.checked_add(entry.name_raw().len()))
+        .unwrap();
+    let data_start = usize::try_from(entry.data_start().unwrap()).unwrap();
+    archive
+        .get(extra_start..data_start)
+        .map(<[u8]>::to_vec)
+        .unwrap()
 }
 
 /// An in-memory filesystem holding the tree the archive tests are written against.
@@ -621,4 +648,60 @@ fn bytes_that_are_not_an_archive_report_an_error() {
     let mut source = Cursor::new(b"this is not a zip archive at all".to_vec());
 
     assert!(MemorySystem::from_zip_stream(&mut source).is_err());
+}
+
+#[test]
+fn every_file_entry_carries_a_zip64_local_header() {
+    // The zip64 extra field is what lets an entry declare a length past
+    // 0xFFFFFFFF. It is on every file of this tiny archive because `file_options`
+    // sets `large_file(true)` with no size test at all; drop that flag and the
+    // extra field disappears, along with the crate's ability to archive anything
+    // at or above four gibibytes.
+    let system = memory_project();
+    let mut archive = Vec::new();
+    to_zip_writer(
+        &system,
+        Path::new("/proj"),
+        &mut archive,
+        ZipOptions::default(),
+    )
+    .unwrap();
+
+    let files: Vec<String> = entry_names(&archive)
+        .into_iter()
+        .filter(|name| !name.ends_with('/'))
+        .collect();
+    assert_eq!(files.len(), 4);
+    for name in files {
+        let extra = local_extra_field(&archive, &name);
+        assert!(
+            extra.starts_with(&ZIP64_EXTRA_FIELD_HEADER),
+            "entry {name} has no zip64 extra field in its local header: {extra:?}"
+        );
+    }
+}
+
+#[test]
+fn directory_entries_stay_off_the_zip64_path() {
+    // `ZipWriter::add_directory` never returns to the local header it just wrote,
+    // so a zip64 extra field placed there keeps its `u64::MAX` placeholder sizes
+    // and a streaming reader waits forever for entry data that is not coming.
+    let system = memory_project();
+    let mut archive = Vec::new();
+    to_zip_writer(
+        &system,
+        Path::new("/proj"),
+        &mut archive,
+        ZipOptions::default(),
+    )
+    .unwrap();
+
+    let directories: Vec<String> = entry_names(&archive)
+        .into_iter()
+        .filter(|name| name.ends_with('/'))
+        .collect();
+    assert_eq!(directories.len(), 4);
+    for name in directories {
+        assert_eq!(local_extra_field(&archive, &name), Vec::new());
+    }
 }
