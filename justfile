@@ -15,15 +15,28 @@ fmt-check:
     @echo "Checking code formatting..."
     cargo fmt --all -- --check
 
-# Run linting with clippy (lint config lives in Cargo.toml [lints.clippy])
+# Run linting with clippy (lint config lives in Cargo.toml [lints.clippy]).
+# `-D warnings` promotes rustc's own warn-level lints -- unused imports, dead
+# fields, unfulfilled lint expectations -- to errors. The [lints.clippy] table
+# only governs clippy's groups, so without this a plain rustc warning passes the
+# gate.
 lint:
     @echo "Running clippy lints..."
-    cargo clippy --all-targets --all-features
+    cargo clippy --all-targets --all-features -- -D warnings
 
 # Run all tests (every feature except the opt-in expensive ones)
 test:
     @echo "Running tests..."
     cargo test --features zip,process
+
+# Lint every feature combination that ships. `lint` alone only covers
+# --all-features, so a warning that appears only without a feature slips past it.
+lint-features:
+    @echo "Linting each feature combination..."
+    cargo clippy --all-targets --no-default-features -- -D warnings
+    cargo clippy --all-targets --features process -- -D warnings
+    cargo clippy --all-targets --features zip -- -D warnings
+    cargo clippy --all-targets --features zip,process -- -D warnings
 
 # Run tests across every feature combination that ships
 test-features:
@@ -81,5 +94,5 @@ docs:
     cargo doc --all-features --no-deps
 
 # Full pipeline (standardized `all` entry point across tixena repos).
-all: fmt-check lint test-features build
+all: fmt-check lint lint-features test-features build
     @echo "All checks completed successfully!"
