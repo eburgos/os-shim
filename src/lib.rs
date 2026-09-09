@@ -288,7 +288,15 @@ pub trait System: Send + Sync {
 
     /// A pull-based zip stream of `source`, held in memory.
     ///
+    /// The stream is a reader over a finished archive, not a pipe fed while the
+    /// archive is built: the first byte is available only once the last one is.
     /// Provided method: implementors get it for free.
+    ///
+    /// # Memory
+    ///
+    /// Peak usage is roughly twice the archive's size, since the archive is
+    /// built in one buffer and handed to the reader in another. See
+    /// [`to_zip_writer`](Self::to_zip_writer) for the ceiling that follows.
     ///
     /// # Errors
     ///
@@ -303,6 +311,12 @@ pub trait System: Send + Sync {
     /// The zip archive of `source` as bytes.
     ///
     /// Provided method: implementors get it for free.
+    ///
+    /// # Memory
+    ///
+    /// Peak usage is roughly twice the archive's size: the returned `Vec` plus
+    /// the buffer it was built in. See [`to_zip_writer`](Self::to_zip_writer)
+    /// for the ceiling that follows from it.
     ///
     /// # Errors
     ///
@@ -320,6 +334,21 @@ pub trait System: Send + Sync {
     ///
     /// A directory contributes its *contents*: archiving `A/` yields `file.txt`,
     /// not `A/file.txt`. Provided method: implementors get it for free.
+    ///
+    /// # Memory
+    ///
+    /// The whole archive is built in memory before any of it reaches `sink`, so
+    /// peak usage is the archive's size plus a constant under 3 MiB. That is the
+    /// compressed size: a tree of source text at roughly 5.5 to 1 costs far less
+    /// than its bytes on disk, while already-compressed content costs slightly
+    /// more than it. Keep archives under about 1 GiB unless the caller controls
+    /// the machine — above that a small container or build runner is killed by
+    /// the operating system rather than given an error it can handle.
+    ///
+    /// Buffering is not an implementation detail that can be tuned away. An
+    /// archive written incrementally records each entry's size after the entry
+    /// instead of in its header, and one shaped that way cannot be read back by
+    /// [`MemorySystem::from_zip_stream`](crate::mock::MemorySystem::from_zip_stream).
     ///
     /// # Errors
     ///
