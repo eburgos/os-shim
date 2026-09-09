@@ -33,6 +33,11 @@ default = []
 process = ["libc"]
 zip = ["dep:zip", "dep:time"]
 
+# Opt-in, expensive tests. Excluded from `just test` and `just test-features`,
+# which name their features rather than passing --all-features; run it with
+# `just test-slow`. Adding a feature here means updating those recipes.
+zip-large-file = ["zip"]
+
 [lints.clippy]
 all = { level = "deny", priority = -1 }
 pedantic = { level = "deny", priority = -1 }
