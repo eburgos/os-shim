@@ -7,7 +7,9 @@ use crate::{FileMetadata, System, TempDirHandle, WalkEntry};
 use std::env::VarError;
 use std::io::{self, Cursor, Read, Write, pipe};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
+#[cfg(feature = "zip-large-file")]
+use std::process::Stdio;
 use std::thread;
 use time::OffsetDateTime;
 use zip::ZipArchive;
@@ -445,8 +447,6 @@ fn real_and_memory_agree_on_names_and_contents() {
 
 #[test]
 fn info_zip_reports_a_clean_archive() {
-    use std::process::{Command, Stdio};
-
     let system = RealSystem::new();
     let temp = system.create_temp_dir().unwrap();
     let root = temp.path().join("proj");

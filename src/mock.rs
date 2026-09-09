@@ -76,7 +76,6 @@ impl MemorySystem {
     /// it to `write`: that held the contents twice, once in the writer and once
     /// on the way into the map, which is a gigabyte of waste per gigabyte
     /// written.
-    #[cfg(feature = "zip")]
     fn append_chunk(&self, path: &Path, chunk: &[u8], truncate: bool) -> io::Result<()> {
         let mut state = self
             .state
@@ -335,9 +334,7 @@ impl System for MemorySystem {
         // For create, we need a writer that updates the mock filesystem
         // We'll use a custom writer that captures bytes
         Ok(Box::new(MemoryWriter {
-            buffer: Vec::new(),
             path: path.to_path_buf(),
-            #[cfg(feature = "zip")]
             started: false,
             system: self.clone(),
         }))
@@ -799,14 +796,10 @@ impl System for MemorySystem {
 
 /// Custom writer for `MemorySystem` that writes to in-memory filesystem.
 struct MemoryWriter {
-    /// Accumulated bytes waiting to be flushed. Empty when the `zip` feature
-    /// streams each chunk into the filesystem as it arrives.
-    buffer: Vec<u8>,
     /// Target file path in the mock filesystem.
     path: PathBuf,
     /// Whether any chunk has reached the filesystem yet, so the first one
     /// truncates and later ones append.
-    #[cfg(feature = "zip")]
     started: bool,
     /// Reference to the parent mock system for writing.
     system: MemorySystem,
@@ -817,15 +810,7 @@ struct MemoryWriter {
     reason = "Only implementing what I need"
 )]
 impl Write for MemoryWriter {
-    #[cfg(not(feature = "zip"))]
-    #[inline]
-    fn flush(&mut self) -> io::Result<()> {
-        self.system.write(&self.path, &self.buffer)?;
-        Ok(())
-    }
-
     /// Each chunk is already in the filesystem, so there is nothing held back.
-    #[cfg(feature = "zip")]
     #[inline]
     fn flush(&mut self) -> io::Result<()> {
         if self.started {
@@ -835,14 +820,6 @@ impl Write for MemoryWriter {
         self.system.append_chunk(&self.path, &[], true)
     }
 
-    #[cfg(not(feature = "zip"))]
-    #[inline]
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.buffer.extend_from_slice(buf);
-        Ok(buf.len())
-    }
-
-    #[cfg(feature = "zip")]
     #[inline]
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         self.system.append_chunk(&self.path, buf, !self.started)?;
