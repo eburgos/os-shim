@@ -181,9 +181,13 @@ where
         if let Some(parent) = target.parent() {
             system.create_dir_all(parent)?;
         }
-        let mut bytes = Vec::new();
-        entry.read_to_end(&mut bytes)?;
-        system.write(&target, &bytes)?;
+        // Streamed rather than read whole: `read_to_end` would hold the entry's
+        // full *uncompressed* length, which for a real filesystem is a gigabyte
+        // of resident memory to write a gigabyte file. `create` hands back a
+        // sink, so the entry moves through a fixed buffer instead.
+        let mut sink = system.create(&target)?;
+        io::copy(&mut entry, &mut sink)?;
+        sink.flush()?;
     }
     Ok(())
 }
