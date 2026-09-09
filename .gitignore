@@ -6,3 +6,8 @@ Cargo.lock
 .dolt/
 *.db
 .beads-credential-key
+.beads.gate.lock
+
+# remargin agent identity (local, never committed)
+.remargin.yaml
+.remargin/

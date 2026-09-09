@@ -6,15 +6,15 @@
 //! # Implementations
 //!
 //! - [`RealSystem`](real::RealSystem): Production implementation using `std::env` and `std::fs`.
-//! - [`MockSystem`](mock::MockSystem): In-memory implementation for fast, isolated unit tests.
+//! - [`MemorySystem`](mock::MemorySystem): In-memory implementation for fast, isolated unit tests.
 //!
 //! # Example
 //!
 //! ```
-//! use os_shim::{System, mock::MockSystem};
+//! use os_shim::{System, mock::MemorySystem};
 //! use std::path::Path;
 //!
-//! let system = MockSystem::new()
+//! let system = MemorySystem::new()
 //!     .with_env("HOME", "/home/user").unwrap()
 //!     .with_file("/test/file.txt", b"Hello, world!").unwrap()
 //!     .with_dir("/test/subdir").unwrap();
@@ -55,7 +55,7 @@ pub struct WalkEntry {
     pub path: PathBuf,
 }
 
-/// File metadata -- os-shim's own type, fully constructable by `MockSystem`.
+/// File metadata -- os-shim's own type, fully constructable by `MemorySystem`.
 ///
 /// Replaces `std::fs::Metadata` which is opaque and cannot be
 /// meaningfully constructed in mock implementations.
@@ -78,7 +78,7 @@ pub struct FileMetadata {
 /// that are automatically cleaned up when the handle is dropped.
 ///
 /// For `RealSystem`, this wraps `tempfile::TempDir` and uses real filesystem.
-/// For `MockSystem`, this manages an in-memory temporary directory.
+/// For `MemorySystem`, this manages an in-memory temporary directory.
 pub trait TempDirHandle {
     /// Get the path to the temporary directory.
     fn path(&self) -> &Path;
@@ -91,7 +91,7 @@ pub trait TempDirHandle {
 ///
 /// # Implementations
 /// - `RealSystem`: Production implementation using `std::env` and `std::fs`.
-/// - `MockSystem`: Test implementation using in-memory storage.
+/// - `MemorySystem`: Test implementation using in-memory storage.
 pub trait System: Send + Sync {
     // ==================== Environment Operations ====================
 
@@ -135,7 +135,7 @@ pub trait System: Send + Sync {
     ///
     /// # Note
     /// For `RealSystem`, this uses `tempfile::TempDir` on the real filesystem.
-    /// For `MockSystem`, this creates an in-memory temporary directory.
+    /// For `MemorySystem`, this creates an in-memory temporary directory.
     ///
     /// # Errors
     ///
@@ -277,7 +277,7 @@ pub trait System: Send + Sync {
     ///
     /// # Note
     /// For `RealSystem`, this respects .gitignore files using the `ignore` crate.
-    /// For `MockSystem`, this walks the in-memory filesystem.
+    /// For `MemorySystem`, this walks the in-memory filesystem.
     ///
     /// # Errors
     ///

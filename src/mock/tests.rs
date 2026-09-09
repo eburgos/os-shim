@@ -3,7 +3,7 @@ use std::path::Path;
 
 #[test]
 fn metadata_returns_correct_len_for_file() {
-    let system = MockSystem::new()
+    let system = MemorySystem::new()
         .with_file("/test/file.txt", b"hello")
         .unwrap();
 
@@ -15,7 +15,7 @@ fn metadata_returns_correct_len_for_file() {
 
 #[test]
 fn metadata_returns_dir_info() {
-    let system = MockSystem::new().with_dir("/mydir").unwrap();
+    let system = MemorySystem::new().with_dir("/mydir").unwrap();
 
     let meta = system.metadata(Path::new("/mydir")).unwrap();
     assert!(meta.is_dir);
@@ -25,7 +25,7 @@ fn metadata_returns_dir_info() {
 
 #[test]
 fn metadata_not_found() {
-    let system = MockSystem::new();
+    let system = MemorySystem::new();
     let result = system.metadata(Path::new("/missing"));
     assert!(result.is_err());
     assert_eq!(result.unwrap_err().kind(), io::ErrorKind::NotFound);
@@ -33,7 +33,7 @@ fn metadata_not_found() {
 
 #[test]
 fn metadata_modified_updates_on_write() {
-    let system = MockSystem::new().with_dir("/test").unwrap();
+    let system = MemorySystem::new().with_dir("/test").unwrap();
 
     system.write(Path::new("/test/file.txt"), b"first").unwrap();
     let mtime1 = system
@@ -55,7 +55,7 @@ fn metadata_modified_updates_on_write() {
 
 #[test]
 fn rename_file_moves_content() {
-    let system = MockSystem::new()
+    let system = MemorySystem::new()
         .with_file("/test/a.txt", b"content")
         .unwrap();
 
@@ -73,7 +73,7 @@ fn rename_file_moves_content() {
 
 #[test]
 fn rename_nonexistent_returns_error() {
-    let system = MockSystem::new();
+    let system = MemorySystem::new();
     let result = system.rename(Path::new("/missing"), Path::new("/other"));
     assert!(result.is_err());
     assert_eq!(result.unwrap_err().kind(), io::ErrorKind::NotFound);
@@ -81,7 +81,7 @@ fn rename_nonexistent_returns_error() {
 
 #[test]
 fn open_append_creates_new_file() {
-    let system = MockSystem::new().with_dir("/test").unwrap();
+    let system = MemorySystem::new().with_dir("/test").unwrap();
 
     let mut writer = system.open_append(Path::new("/test/new.txt")).unwrap();
     writer.write_all(b"hello").unwrap();
@@ -96,7 +96,7 @@ fn open_append_creates_new_file() {
 
 #[test]
 fn open_append_extends_existing() {
-    let system = MockSystem::new()
+    let system = MemorySystem::new()
         .with_file("/test/file.txt", b"hello")
         .unwrap();
 
@@ -113,7 +113,7 @@ fn open_append_extends_existing() {
 
 #[test]
 fn current_exe_returns_configured_path() {
-    let system = MockSystem::new()
+    let system = MemorySystem::new()
         .with_current_exe("/usr/bin/vigil")
         .unwrap();
 
@@ -125,13 +125,13 @@ fn current_exe_returns_configured_path() {
 
 #[test]
 fn current_exe_returns_default() {
-    let system = MockSystem::new();
+    let system = MemorySystem::new();
     assert_eq!(system.current_exe().unwrap(), PathBuf::from("/mock/exe"));
 }
 
 #[test]
 fn set_env_var_updates_env() {
-    let system = MockSystem::new();
+    let system = MemorySystem::new();
     system.set_env_var("MY_KEY", "my_value");
     assert_eq!(system.env_var("MY_KEY").unwrap(), "my_value");
 }
@@ -139,7 +139,7 @@ fn set_env_var_updates_env() {
 #[cfg(feature = "process")]
 #[test]
 fn is_pid_alive_checks_mock_pids() {
-    let system = MockSystem::new().with_pid(1234).unwrap();
+    let system = MemorySystem::new().with_pid(1234).unwrap();
 
     assert!(system.is_pid_alive(1234));
     assert!(!system.is_pid_alive(9999));
@@ -147,7 +147,7 @@ fn is_pid_alive_checks_mock_pids() {
 
 #[test]
 fn canonicalize_passes_absolute_through_and_joins_relative() {
-    let system = MockSystem::new().with_current_dir("/base").unwrap();
+    let system = MemorySystem::new().with_current_dir("/base").unwrap();
 
     assert_eq!(
         system.canonicalize(Path::new("/already/absolute")).unwrap(),
@@ -161,7 +161,7 @@ fn canonicalize_passes_absolute_through_and_joins_relative() {
 
 #[test]
 fn create_temp_dir_exists_then_cleaned_up_on_drop() {
-    let system = MockSystem::new();
+    let system = MemorySystem::new();
     let temp = system.create_temp_dir().unwrap();
     let path = temp.path().to_path_buf();
 
@@ -172,7 +172,7 @@ fn create_temp_dir_exists_then_cleaned_up_on_drop() {
 
 #[test]
 fn read_to_string_rejects_invalid_utf8() {
-    let system = MockSystem::new()
+    let system = MemorySystem::new()
         .with_file("/bad.bin", &[0xff, 0xfe, 0x00])
         .unwrap();
 
@@ -182,19 +182,19 @@ fn read_to_string_rejects_invalid_utf8() {
 
 #[test]
 fn with_current_dir_sets_current_dir() {
-    let system = MockSystem::new().with_current_dir("/custom/cwd").unwrap();
+    let system = MemorySystem::new().with_current_dir("/custom/cwd").unwrap();
     assert_eq!(system.current_dir().unwrap(), PathBuf::from("/custom/cwd"));
 }
 
 #[test]
 fn with_env_sets_env_var() {
-    let system = MockSystem::new().with_env("CONFIGURED", "yes").unwrap();
+    let system = MemorySystem::new().with_env("CONFIGURED", "yes").unwrap();
     assert_eq!(system.env_var("CONFIGURED").unwrap(), "yes");
 }
 
 #[test]
 fn default_matches_new() {
-    let system = MockSystem::default();
+    let system = MemorySystem::default();
     assert_eq!(system.current_dir().unwrap(), PathBuf::from("/"));
     assert!(system.is_dir(Path::new("/")).unwrap());
 }

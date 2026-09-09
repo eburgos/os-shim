@@ -1,8 +1,8 @@
-//! Mock system implementation for testing.
+//! In-memory system implementation for testing.
 
 #![expect(
     clippy::module_name_repetitions,
-    reason = "MockSystem is clearer than just Mock in the system module"
+    reason = "MemorySystem is clearer than just Memory in the system module"
 )]
 #![expect(
     clippy::std_instead_of_alloc,
@@ -29,15 +29,15 @@ static TEMP_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// In-memory implementation of System trait for testing.
 ///
-/// `MockSystem` provides an in-memory filesystem and environment,
+/// `MemorySystem` provides an in-memory filesystem and environment,
 /// perfect for fast, isolated unit tests without side effects.
 ///
 /// # Example
 /// ```
-/// use os_shim::{System, mock::MockSystem};
+/// use os_shim::{System, mock::MemorySystem};
 /// use std::path::Path;
 ///
-/// let system = MockSystem::new()
+/// let system = MemorySystem::new()
 ///     .with_env("HOME", "/home/user").unwrap()
 ///     .with_file("/test/file.txt", b"Hello, world!").unwrap()
 ///     .with_dir("/test/subdir").unwrap();
@@ -46,13 +46,13 @@ static TEMP_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// assert!(system.exists(Path::new("/test/file.txt")).unwrap());
 /// ```
 #[derive(Clone)]
-pub struct MockSystem {
+pub struct MemorySystem {
     /// Shared mutable state protected by a read-write lock.
-    state: Arc<RwLock<MockSystemState>>,
+    state: Arc<RwLock<MemorySystemState>>,
 }
 
 /// In-memory state backing the mock filesystem and environment.
-struct MockSystemState {
+struct MemorySystemState {
     /// Current working directory path.
     current_dir: PathBuf,
     /// Path returned by `current_exe()`.
@@ -70,7 +70,7 @@ struct MockSystemState {
     pids_alive: BTreeSet<u32>,
 }
 
-impl MockSystem {
+impl MemorySystem {
     /// Ensure all ancestor directories exist for a given path.
     #[inline]
     fn ensure_parent_dirs(dirs: &mut BTreeSet<PathBuf>, path: &Path) {
@@ -93,12 +93,12 @@ impl MockSystem {
         dirs.insert(path.to_path_buf());
     }
 
-    /// Create a new `MockSystem` with default state.
+    /// Create a new `MemorySystem` with default state.
     #[must_use]
     #[inline]
     pub fn new() -> Self {
         Self {
-            state: Arc::new(RwLock::new(MockSystemState {
+            state: Arc::new(RwLock::new(MemorySystemState {
                 current_dir: PathBuf::from("/"),
                 current_exe: PathBuf::from("/mock/exe"),
                 dirs: BTreeSet::from([PathBuf::from("/")]),
@@ -237,14 +237,14 @@ impl MockSystem {
     }
 }
 
-impl Default for MockSystem {
+impl Default for MemorySystem {
     #[inline]
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl System for MockSystem {
+impl System for MemorySystem {
     #[inline]
     fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
         // For mock, just return absolute path
@@ -287,7 +287,7 @@ impl System for MockSystem {
     fn create(&self, path: &Path) -> io::Result<Box<dyn Write + '_>> {
         // For create, we need a writer that updates the mock filesystem
         // We'll use a custom writer that captures bytes
-        Ok(Box::new(MockWriter {
+        Ok(Box::new(MemoryWriter {
             buffer: Vec::new(),
             path: path.to_path_buf(),
             system: self.clone(),
@@ -314,7 +314,7 @@ impl System for MockSystem {
         // Create the directory in the mock filesystem
         self.create_dir_all(&temp_path)?;
 
-        Ok(Box::new(MockTempDir {
+        Ok(Box::new(MemoryTempDir {
             path: temp_path,
             system: self.clone(),
         }))
@@ -382,7 +382,7 @@ impl System for MockSystem {
         let state = self
             .state
             .read()
-            .expect("MockSystem lock poisoned in is_pid_alive");
+            .expect("MemorySystem lock poisoned in is_pid_alive");
         state.pids_alive.contains(&pid)
     }
 
@@ -442,7 +442,7 @@ impl System for MockSystem {
 
     #[inline]
     fn open_append(&self, path: &Path) -> io::Result<Box<dyn Write + '_>> {
-        Ok(Box::new(MockAppendWriter {
+        Ok(Box::new(MemoryAppendWriter {
             buffer: Vec::new(),
             path: path.to_path_buf(),
             system: self.clone(),
@@ -638,7 +638,7 @@ impl System for MockSystem {
         let mut state = self
             .state
             .write()
-            .expect("MockSystem lock poisoned in set_env_var");
+            .expect("MemorySystem lock poisoned in set_env_var");
         state.env_vars.insert(key.to_owned(), value.to_owned());
     }
 
@@ -748,21 +748,21 @@ impl System for MockSystem {
     }
 }
 
-/// Custom writer for `MockSystem` that writes to in-memory filesystem.
-struct MockWriter {
+/// Custom writer for `MemorySystem` that writes to in-memory filesystem.
+struct MemoryWriter {
     /// Accumulated bytes waiting to be flushed.
     buffer: Vec<u8>,
     /// Target file path in the mock filesystem.
     path: PathBuf,
     /// Reference to the parent mock system for writing.
-    system: MockSystem,
+    system: MemorySystem,
 }
 
 #[expect(
     clippy::missing_trait_methods,
     reason = "Only implementing what I need"
 )]
-impl Write for MockWriter {
+impl Write for MemoryWriter {
     #[inline]
     fn flush(&mut self) -> io::Result<()> {
         self.system.write(&self.path, &self.buffer)?;
@@ -776,7 +776,7 @@ impl Write for MockWriter {
     }
 }
 
-impl Drop for MockWriter {
+impl Drop for MemoryWriter {
     #[inline]
     fn drop(&mut self) {
         match self.flush() {
@@ -786,21 +786,21 @@ impl Drop for MockWriter {
     }
 }
 
-/// Append writer for `MockSystem` that extends existing file contents on flush.
-struct MockAppendWriter {
+/// Append writer for `MemorySystem` that extends existing file contents on flush.
+struct MemoryAppendWriter {
     /// Accumulated bytes waiting to be appended.
     buffer: Vec<u8>,
     /// Target file path in the mock filesystem.
     path: PathBuf,
     /// Reference to the parent mock system for writing.
-    system: MockSystem,
+    system: MemorySystem,
 }
 
 #[expect(
     clippy::missing_trait_methods,
     reason = "Only implementing what I need"
 )]
-impl Write for MockAppendWriter {
+impl Write for MemoryAppendWriter {
     #[inline]
     fn flush(&mut self) -> io::Result<()> {
         let mut state = self
@@ -837,7 +837,7 @@ impl Write for MockAppendWriter {
     }
 }
 
-impl Drop for MockAppendWriter {
+impl Drop for MemoryAppendWriter {
     #[inline]
     fn drop(&mut self) {
         match self.flush() {
@@ -847,23 +847,23 @@ impl Drop for MockAppendWriter {
     }
 }
 
-/// Mock temporary directory handle that cleans up on drop.
+/// In-memory temporary directory handle that cleans up on drop.
 #[non_exhaustive]
-pub struct MockTempDir {
+pub struct MemoryTempDir {
     /// Path to the temporary directory in the mock filesystem.
     path: PathBuf,
     /// Reference to the parent mock system for cleanup.
-    system: MockSystem,
+    system: MemorySystem,
 }
 
-impl TempDirHandle for MockTempDir {
+impl TempDirHandle for MemoryTempDir {
     #[inline]
     fn path(&self) -> &Path {
         &self.path
     }
 }
 
-impl Drop for MockTempDir {
+impl Drop for MemoryTempDir {
     #[inline]
     fn drop(&mut self) {
         // Remove the temporary directory from the mock filesystem when dropped
