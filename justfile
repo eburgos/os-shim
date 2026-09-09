@@ -20,25 +20,39 @@ lint:
     @echo "Running clippy lints..."
     cargo clippy --all-targets --all-features
 
-# Run all tests
+# Run all tests (every feature except the opt-in expensive ones)
 test:
     @echo "Running tests..."
-    cargo test --all-features
+    cargo test --features zip,process
+
+# Run tests across every feature combination that ships
+test-features:
+    @echo "Testing each feature combination..."
+    cargo test --no-default-features
+    cargo test --features process
+    cargo test --features zip
+    cargo test --features zip,process
+
+# Run the opt-in expensive tests. Wants a disk-backed TMPDIR and double-digit
+# gibibytes of headroom; takes minutes, not seconds.
+test-slow:
+    @echo "Running expensive tests..."
+    cargo test --features zip,process,zip-large-file -- --nocapture
 
 # Run tests with output
 test-verbose:
     @echo "Running tests (verbose)..."
-    cargo test --all-features -- --nocapture
+    cargo test --features zip,process -- --nocapture
 
 # Generate code coverage report (requires cargo-llvm-cov)
 test-coverage:
     @echo "Generating code coverage report..."
-    cargo llvm-cov --workspace --all-features
+    cargo llvm-cov --workspace --features zip,process
 
 # Generate code coverage HTML report (requires cargo-llvm-cov)
 test-coverage-html:
     @echo "Generating code coverage HTML report..."
-    cargo llvm-cov --workspace --all-features --html
+    cargo llvm-cov --workspace --features zip,process --html
     @echo "Coverage report generated in target/llvm-cov/html/"
 
 # Build in debug mode
@@ -67,5 +81,5 @@ docs:
     cargo doc --all-features --no-deps
 
 # Full pipeline (standardized `all` entry point across tixena repos).
-all: fmt-check lint test build
+all: fmt-check lint test-features build
     @echo "All checks completed successfully!"

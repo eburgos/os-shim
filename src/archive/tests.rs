@@ -7,10 +7,20 @@ use crate::{FileMetadata, System, TempDirHandle, WalkEntry};
 use std::env::VarError;
 use std::io::{self, Cursor, Read, Write, pipe};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::thread;
 use time::OffsetDateTime;
 use zip::ZipArchive;
 use zip::write::{SimpleFileOptions, ZipWriter};
+
+/// Bytes in the large entry the zip64 pin archives: four gibibytes and one byte,
+/// one past the largest length a non-zip64 ZIP header can express.
+#[cfg(feature = "zip-large-file")]
+const LARGE_ENTRY_BYTES: u64 = 0x0001_0000_0001;
+
+/// Bytes moved per pass while the large fixture is generated.
+#[cfg(feature = "zip-large-file")]
+const LARGE_ENTRY_CHUNK_BYTES: usize = 0x0010_0000;
 
 /// Bytes a local file header occupies ahead of its variable-length file name.
 const LOCAL_HEADER_FIXED_BYTES: usize = 30;
@@ -435,7 +445,7 @@ fn real_and_memory_agree_on_names_and_contents() {
 
 #[test]
 fn info_zip_reports_a_clean_archive() {
-    use std::process::Command;
+    use std::process::{Command, Stdio};
 
     let system = RealSystem::new();
     let temp = system.create_temp_dir().unwrap();
@@ -704,4 +714,114 @@ fn directory_entries_stay_off_the_zip64_path() {
     for name in directories {
         assert_eq!(local_extra_field(&archive, &name), Vec::new());
     }
+}
+
+/// The digest at the head of a `sha256sum` output line.
+#[cfg(feature = "zip-large-file")]
+fn digest_of(output: &[u8]) -> String {
+    let text = String::from_utf8(output.to_vec()).unwrap();
+    text.split_whitespace().next().unwrap().to_owned()
+}
+
+/// SHA-256 of the entry `name` as Info-ZIP's `unzip -p` streams it out.
+#[cfg(feature = "zip-large-file")]
+fn sha256_of_extracted_entry(archive: &Path, name: &str) -> String {
+    let mut extractor = Command::new("unzip")
+        .arg("-p")
+        .arg(archive)
+        .arg(name)
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stream = extractor.stdout.take().unwrap();
+    let digest = Command::new("sha256sum")
+        .stdin(Stdio::from(stream))
+        .output()
+        .unwrap();
+    assert!(
+        extractor.wait().unwrap().success(),
+        "unzip -p could not extract {name}"
+    );
+    assert!(
+        digest.status.success(),
+        "sha256sum failed on the extracted entry"
+    );
+    digest_of(&digest.stdout)
+}
+
+/// SHA-256 of the file at `path`, as `sha256sum` computes it.
+#[cfg(feature = "zip-large-file")]
+fn sha256_of_file(path: &Path) -> String {
+    let output = Command::new("sha256sum").arg(path).output().unwrap();
+    assert!(
+        output.status.success(),
+        "sha256sum failed on {}",
+        path.display()
+    );
+    digest_of(&output.stdout)
+}
+
+/// Write `bytes` of `/dev/urandom` to `path`, streaming through a fixed buffer.
+///
+/// Random data, because deflate must not be able to hide four gibibytes behind a
+/// small compressed length: that would leave the zip64 path untouched.
+#[cfg(feature = "zip-large-file")]
+fn write_incompressible_file(system: RealSystem, path: &Path, bytes: u64) {
+    let mut entropy = system.open(Path::new("/dev/urandom")).unwrap();
+    let mut sink = system.create(path).unwrap();
+    let mut buffer = vec![0_u8; LARGE_ENTRY_CHUNK_BYTES];
+    let mut remaining = bytes;
+    while remaining != 0 {
+        let want = usize::try_from(remaining)
+            .unwrap_or(LARGE_ENTRY_CHUNK_BYTES)
+            .min(LARGE_ENTRY_CHUNK_BYTES);
+        let (slot, _rest) = buffer.split_at_mut(want);
+        entropy.read_exact(slot).unwrap();
+        sink.write_all(slot).unwrap();
+        remaining = remaining.saturating_sub(u64::try_from(want).unwrap());
+    }
+    sink.flush().unwrap();
+}
+
+/// Pins zip64 for an entry past the 32-bit boundary: `to_zip_writer` produces an
+/// archive Info-ZIP accepts, and the entry survives the round trip byte for byte.
+///
+/// Opt-in, and deliberately so. It writes a four gibibyte fixture and
+/// `to_zip_writer` buffers the finished archive in memory, so it wants a
+/// disk-backed `TMPDIR` and double-digit gibibytes of headroom:
+///
+/// ```text
+/// TMPDIR=/var/tmp cargo test --features zip-large-file \
+///     an_entry_above_four_gibibytes_archives_and_extracts
+/// ```
+#[cfg(feature = "zip-large-file")]
+#[test]
+fn an_entry_above_four_gibibytes_archives_and_extracts() {
+    let real = RealSystem::new();
+    let temp = real.create_temp_dir().unwrap();
+    let source = temp.path().join("big.bin");
+    write_incompressible_file(real, &source, LARGE_ENTRY_BYTES);
+    assert_eq!(real.metadata(&source).unwrap().len, LARGE_ENTRY_BYTES);
+
+    let destination = temp.path().join("big.zip");
+    let mut sink = real.create(&destination).unwrap();
+    to_zip_writer(&real, &source, &mut sink, ZipOptions::default()).unwrap();
+    drop(sink);
+
+    let tested = Command::new("unzip")
+        .arg("-t")
+        .arg(&destination)
+        .output()
+        .unwrap();
+    assert!(
+        tested.status.success(),
+        "unzip -t rejected the archive: {}{}",
+        String::from_utf8_lossy(&tested.stdout),
+        String::from_utf8_lossy(&tested.stderr)
+    );
+
+    assert_eq!(
+        sha256_of_extracted_entry(&destination, "big.bin"),
+        sha256_of_file(&source)
+    );
 }
