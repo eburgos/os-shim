@@ -1,10 +1,6 @@
 //! In-memory system implementation for testing.
 
 #![expect(
-    clippy::module_name_repetitions,
-    reason = "MemorySystem is clearer than just Memory in the system module"
-)]
-#![expect(
     clippy::std_instead_of_alloc,
     reason = "I couldn't find that trait in the alloc crate"
 )]
