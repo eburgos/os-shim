@@ -120,6 +120,27 @@ fn file_name_of(path: &Path) -> io::Result<String> {
         .ok_or_else(|| io::Error::other(format!("Non-UTF-8 file name in {}", path.display())))
 }
 
+/// Per-entry zip options for a file, pinned to zip64.
+///
+/// `large_file(true)` goes on every file, not on files a size check picks out.
+/// Deflate can make incompressible data larger than its source and the zip crate
+/// rejects an oversized compressed length separately from an oversized
+/// uncompressed one, so any threshold needs a margin, and a wrong margin fails
+/// only on multi-gigabyte inputs nobody exercises routinely. The cost is a
+/// 20-byte zip64 extra field per file and a version-needed-to-extract of 4.5.
+///
+/// Directory entries keep the plain options. `ZipWriter::add_directory` marks
+/// the entry finished the moment it is opened, so the writer never revisits the
+/// local header to replace the zip64 placeholder sizes it stamped there --
+/// `u64::MAX` for both -- and a streaming reader then waits for that many bytes
+/// of entry data and hits end of file. A directory carries no data anyway.
+fn file_options<S>(system: &S, path: &Path) -> io::Result<SimpleFileOptions>
+where
+    S: System + ?Sized,
+{
+    Ok(entry_options(system, path)?.large_file(true))
+}
+
 /// Whether `path`'s final component is dot-prefixed.
 fn is_hidden(path: &Path) -> bool {
     path.file_name()
@@ -195,7 +216,7 @@ where
     // into a rewindable buffer keeps the round trip through a pipe possible, and
     // is also what makes Info-ZIP's `unzip -t` report a clean archive.
     let mut buffer = Cursor::new(Vec::<u8>::new());
-    let mut writer = ZipWriter::new(&mut buffer).set_auto_large_file();
+    let mut writer = ZipWriter::new(&mut buffer);
 
     if system.is_dir(source)? {
         let (dirs, files) = walk(system, source, options)?;
@@ -206,13 +227,13 @@ where
         }
         for file in &files {
             writer
-                .start_file(entry_name(source, file)?, entry_options(system, file)?)
+                .start_file(entry_name(source, file)?, file_options(system, file)?)
                 .map_err(io::Error::other)?;
             copy_into(system, file, &mut writer)?;
         }
     } else if system.is_file(source)? {
         writer
-            .start_file(file_name_of(source)?, entry_options(system, source)?)
+            .start_file(file_name_of(source)?, file_options(system, source)?)
             .map_err(io::Error::other)?;
         copy_into(system, source, &mut writer)?;
     } else {
