@@ -18,12 +18,20 @@ ignore = "0.4"
 # Mock implementation logging
 tracing = "0.1"
 
+# Zip archive streaming (optional)
+zip = { version = "8", default-features = false, features = [
+    "deflate-flate2-zlib-rs",
+    "time",
+], optional = true }
+time = { version = "0.3.55", optional = true }
+
 # Process operations (optional)
 libc = { version = "0.2", optional = true }
 
 [features]
 default = []
 process = ["libc"]
+zip = ["dep:zip", "dep:time"]
 
 [lints.clippy]
 all = { level = "deny", priority = -1 }

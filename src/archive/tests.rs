@@ -1,0 +1,624 @@
+//! Tests for zip archive production and loading.
+
+use super::{ZipOptions, to_zip_writer};
+use crate::mock::MemorySystem;
+use crate::real::RealSystem;
+use crate::{FileMetadata, System, TempDirHandle, WalkEntry};
+use std::env::VarError;
+use std::io::{self, Cursor, Read, Write, pipe};
+use std::path::{Path, PathBuf};
+use std::thread;
+use time::OffsetDateTime;
+use zip::ZipArchive;
+use zip::write::{SimpleFileOptions, ZipWriter};
+
+/// A `System` implementor writing only the methods the trait required before the
+/// zip methods arrived, proving an out-of-crate implementor gains them for free.
+struct MinimalSystem {
+    /// The filesystem every required method delegates to.
+    inner: MemorySystem,
+}
+
+/// A `TempDirHandle` implementor writing only `path`, so it keeps the default
+/// `to_zip_stream` body.
+struct PlainTempDir {
+    /// The path the handle reports.
+    path: PathBuf,
+}
+
+impl System for MinimalSystem {
+    fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
+        self.inner.canonicalize(path)
+    }
+
+    fn copy(&self, from: &Path, to: &Path) -> io::Result<u64> {
+        self.inner.copy(from, to)
+    }
+
+    fn create(&self, path: &Path) -> io::Result<Box<dyn Write + '_>> {
+        self.inner.create(path)
+    }
+
+    fn create_dir_all(&self, path: &Path) -> io::Result<()> {
+        self.inner.create_dir_all(path)
+    }
+
+    fn create_temp_dir(&self) -> io::Result<Box<dyn TempDirHandle>> {
+        self.inner.create_temp_dir()
+    }
+
+    fn current_dir(&self) -> io::Result<PathBuf> {
+        self.inner.current_dir()
+    }
+
+    fn current_exe(&self) -> io::Result<PathBuf> {
+        self.inner.current_exe()
+    }
+
+    fn env_var(&self, key: &str) -> Result<String, VarError> {
+        self.inner.env_var(key)
+    }
+
+    fn exists(&self, path: &Path) -> io::Result<bool> {
+        self.inner.exists(path)
+    }
+
+    fn is_dir(&self, path: &Path) -> io::Result<bool> {
+        self.inner.is_dir(path)
+    }
+
+    fn is_file(&self, path: &Path) -> io::Result<bool> {
+        self.inner.is_file(path)
+    }
+
+    #[cfg(feature = "process")]
+    fn is_pid_alive(&self, pid: u32) -> bool {
+        self.inner.is_pid_alive(pid)
+    }
+
+    fn metadata(&self, path: &Path) -> io::Result<FileMetadata> {
+        self.inner.metadata(path)
+    }
+
+    fn open(&self, path: &Path) -> io::Result<Box<dyn Read + '_>> {
+        self.inner.open(path)
+    }
+
+    fn open_append(&self, path: &Path) -> io::Result<Box<dyn Write + '_>> {
+        self.inner.open_append(path)
+    }
+
+    fn read_dir(&self, path: &Path) -> io::Result<Vec<PathBuf>> {
+        self.inner.read_dir(path)
+    }
+
+    fn read_to_string(&self, path: &Path) -> io::Result<String> {
+        self.inner.read_to_string(path)
+    }
+
+    fn remove_dir_all(&self, path: &Path) -> io::Result<()> {
+        self.inner.remove_dir_all(path)
+    }
+
+    fn remove_file(&self, path: &Path) -> io::Result<()> {
+        self.inner.remove_file(path)
+    }
+
+    fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+        self.inner.rename(from, to)
+    }
+
+    fn set_env_var(&self, key: &str, value: &str) {
+        self.inner.set_env_var(key, value);
+    }
+
+    fn walk_dir(
+        &self,
+        path: &Path,
+        follow_links: bool,
+        hidden: bool,
+    ) -> io::Result<Vec<WalkEntry>> {
+        self.inner.walk_dir(path, follow_links, hidden)
+    }
+
+    fn write(&self, path: &Path, contents: &[u8]) -> io::Result<()> {
+        self.inner.write(path, contents)
+    }
+}
+
+impl TempDirHandle for PlainTempDir {
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+/// Bytes of the entry named `name`.
+fn entry_bytes(archive: &[u8], name: &str) -> Vec<u8> {
+    let mut reader = ZipArchive::new(Cursor::new(archive.to_vec())).unwrap();
+    let mut entry = reader.by_name(name).unwrap();
+    let mut bytes = Vec::new();
+    entry.read_to_end(&mut bytes).unwrap();
+    bytes
+}
+
+/// Entry names in the order the archive stores them.
+fn entry_names(archive: &[u8]) -> Vec<String> {
+    let mut reader = ZipArchive::new(Cursor::new(archive.to_vec())).unwrap();
+    (0..reader.len())
+        .map(|index| reader.by_index(index).unwrap().name().to_owned())
+        .collect()
+}
+
+/// The year stamped on the entry named `name`.
+fn entry_year(archive: &[u8], name: &str) -> u16 {
+    let mut reader = ZipArchive::new(Cursor::new(archive.to_vec())).unwrap();
+    reader
+        .by_name(name)
+        .unwrap()
+        .last_modified()
+        .unwrap()
+        .year()
+}
+
+/// An in-memory filesystem holding the tree the archive tests are written against.
+fn memory_project() -> MemorySystem {
+    MemorySystem::new()
+        .with_dir("/proj/.git")
+        .unwrap()
+        .with_dir("/proj/empty")
+        .unwrap()
+        .with_file("/proj/.gitignore", b"target/\n")
+        .unwrap()
+        .with_file("/proj/README.md", b"hi\n")
+        .unwrap()
+        .with_file("/proj/src/main.rs", b"fn main() {}\n")
+        .unwrap()
+        .with_file("/proj/target/artifact.bin", b"\x00\x01\x02")
+        .unwrap()
+}
+
+#[test]
+fn default_options_include_hidden() {
+    assert!(ZipOptions::default().include_hidden);
+}
+
+#[test]
+fn with_hidden_false_excludes_hidden() {
+    assert!(!ZipOptions::default().with_hidden(false).include_hidden);
+}
+
+#[test]
+fn with_hidden_true_restores_the_default() {
+    let options = ZipOptions::default().with_hidden(false).with_hidden(true);
+    assert!(options.include_hidden);
+}
+
+#[test]
+fn directory_contributes_its_contents_at_the_top_level() {
+    let system = memory_project();
+    let mut archive = Vec::new();
+    to_zip_writer(
+        &system,
+        Path::new("/proj"),
+        &mut archive,
+        ZipOptions::default(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        entry_names(&archive),
+        vec![
+            ".git/".to_owned(),
+            "empty/".to_owned(),
+            "src/".to_owned(),
+            "target/".to_owned(),
+            ".gitignore".to_owned(),
+            "README.md".to_owned(),
+            "src/main.rs".to_owned(),
+            "target/artifact.bin".to_owned(),
+        ]
+    );
+    assert_eq!(entry_bytes(&archive, "README.md"), b"hi\n");
+    assert_eq!(entry_bytes(&archive, "src/main.rs"), b"fn main() {}\n");
+}
+
+#[test]
+fn empty_directory_survives_as_an_explicit_entry() {
+    let system = memory_project();
+    let mut archive = Vec::new();
+    to_zip_writer(
+        &system,
+        Path::new("/proj"),
+        &mut archive,
+        ZipOptions::default(),
+    )
+    .unwrap();
+
+    assert!(entry_names(&archive).contains(&"empty/".to_owned()));
+}
+
+#[test]
+fn hidden_entries_are_dropped_when_the_option_is_off() {
+    let system = memory_project();
+    let mut archive = Vec::new();
+    to_zip_writer(
+        &system,
+        Path::new("/proj"),
+        &mut archive,
+        ZipOptions::default().with_hidden(false),
+    )
+    .unwrap();
+
+    let names = entry_names(&archive);
+    assert!(!names.contains(&".gitignore".to_owned()));
+    assert!(!names.contains(&".git/".to_owned()));
+    assert!(names.contains(&"README.md".to_owned()));
+}
+
+#[test]
+fn single_file_yields_exactly_one_bare_entry() {
+    let system = MemorySystem::new()
+        .with_file("/notes/notes.txt", b"jotted")
+        .unwrap();
+    let mut archive = Vec::new();
+    to_zip_writer(
+        &system,
+        Path::new("/notes/notes.txt"),
+        &mut archive,
+        ZipOptions::default(),
+    )
+    .unwrap();
+
+    assert_eq!(entry_names(&archive), vec!["notes.txt".to_owned()]);
+    assert_eq!(entry_bytes(&archive, "notes.txt"), b"jotted");
+}
+
+#[test]
+fn missing_source_reports_not_found() {
+    let system = MemorySystem::new();
+    let mut archive = Vec::new();
+    let result = to_zip_writer(
+        &system,
+        Path::new("/absent"),
+        &mut archive,
+        ZipOptions::default(),
+    );
+
+    assert_eq!(result.unwrap_err().kind(), io::ErrorKind::NotFound);
+}
+
+#[test]
+fn directory_timestamp_older_than_the_zip_floor_is_clamped_up() {
+    // `MemorySystem` stamps directories it was never asked to write with the Unix
+    // epoch, a decade before the earliest date a ZIP entry can carry.
+    let system = MemorySystem::new().with_dir("/proj/empty").unwrap();
+    let mut archive = Vec::new();
+    to_zip_writer(
+        &system,
+        Path::new("/proj"),
+        &mut archive,
+        ZipOptions::default(),
+    )
+    .unwrap();
+
+    assert_eq!(entry_year(&archive, "empty/"), 1980);
+}
+
+#[test]
+fn entry_carries_the_source_modification_time() {
+    let system = RealSystem::new();
+    let temp = system.create_temp_dir().unwrap();
+    let file = temp.path().join("fresh.txt");
+    system.write(&file, b"now").unwrap();
+
+    let mut archive = Vec::new();
+    to_zip_writer(&system, &file, &mut archive, ZipOptions::default()).unwrap();
+
+    let modified = system.metadata(&file).unwrap().modified;
+    let expected = OffsetDateTime::from(modified);
+    let expected_year = u16::try_from(expected.year()).unwrap();
+    assert_eq!(entry_year(&archive, "fresh.txt"), expected_year);
+    assert!(expected_year > 1980);
+}
+
+#[test]
+fn gitignored_file_inside_a_git_repository_is_archived() {
+    let system = RealSystem::new();
+    let temp = system.create_temp_dir().unwrap();
+    let root = temp.path().join("repo");
+    system.create_dir_all(&root.join(".git")).unwrap();
+    system
+        .write(&root.join(".gitignore"), b"target/\n")
+        .unwrap();
+    system.create_dir_all(&root.join("target")).unwrap();
+    system
+        .write(&root.join("target/artifact.bin"), b"built")
+        .unwrap();
+
+    let mut archive = Vec::new();
+    to_zip_writer(&system, &root, &mut archive, ZipOptions::default()).unwrap();
+
+    let names = entry_names(&archive);
+    assert!(names.contains(&"target/artifact.bin".to_owned()));
+    assert!(names.contains(&".gitignore".to_owned()));
+    assert_eq!(entry_bytes(&archive, "target/artifact.bin"), b"built");
+}
+
+#[cfg(unix)]
+#[test]
+fn symlink_back_to_an_ancestor_terminates_as_an_empty_directory() {
+    use std::os::unix::fs::symlink;
+
+    let system = RealSystem::new();
+    let temp = system.create_temp_dir().unwrap();
+    let root = temp.path().join("root");
+    system.create_dir_all(&root.join("inner")).unwrap();
+    symlink(&root, root.join("inner/loop")).unwrap();
+
+    let mut archive = Vec::new();
+    to_zip_writer(&system, &root, &mut archive, ZipOptions::default()).unwrap();
+
+    assert_eq!(
+        entry_names(&archive),
+        vec!["inner/".to_owned(), "inner/loop/".to_owned()]
+    );
+}
+
+#[test]
+fn real_and_memory_agree_on_names_and_contents() {
+    let real = RealSystem::new();
+    let temp = real.create_temp_dir().unwrap();
+    let root = temp.path().join("proj");
+    real.create_dir_all(&root.join("empty")).unwrap();
+    real.create_dir_all(&root.join("src")).unwrap();
+    real.write(&root.join(".hidden"), b"dot").unwrap();
+    real.write(&root.join("README.md"), b"hi\n").unwrap();
+    real.write(&root.join("src/main.rs"), b"fn main() {}\n")
+        .unwrap();
+
+    let memory = MemorySystem::new()
+        .with_dir("/proj/empty")
+        .unwrap()
+        .with_file("/proj/.hidden", b"dot")
+        .unwrap()
+        .with_file("/proj/README.md", b"hi\n")
+        .unwrap()
+        .with_file("/proj/src/main.rs", b"fn main() {}\n")
+        .unwrap();
+
+    let mut from_real = Vec::new();
+    to_zip_writer(&real, &root, &mut from_real, ZipOptions::default()).unwrap();
+    let mut from_memory = Vec::new();
+    to_zip_writer(
+        &memory,
+        Path::new("/proj"),
+        &mut from_memory,
+        ZipOptions::default(),
+    )
+    .unwrap();
+
+    assert_eq!(entry_names(&from_real), entry_names(&from_memory));
+    for name in ["README.md", "src/main.rs", ".hidden"] {
+        assert_eq!(
+            entry_bytes(&from_real, name),
+            entry_bytes(&from_memory, name)
+        );
+    }
+}
+
+#[test]
+fn info_zip_reports_a_clean_archive() {
+    use std::process::Command;
+
+    let system = RealSystem::new();
+    let temp = system.create_temp_dir().unwrap();
+    let root = temp.path().join("proj");
+    system.create_dir_all(&root.join("empty")).unwrap();
+    system.create_dir_all(&root.join("src")).unwrap();
+    system.write(&root.join("README.md"), b"hi\n").unwrap();
+    system
+        .write(&root.join("src/main.rs"), b"fn main() {}\n")
+        .unwrap();
+
+    let bundle = temp.path().join("proj.zip");
+    let mut sink = system.create(&bundle).unwrap();
+    to_zip_writer(&system, &root, &mut sink, ZipOptions::default()).unwrap();
+    drop(sink);
+
+    // `unzip` is an external tool; where it is not installed there is nothing to
+    // assert about it, and the archive is still covered by the reader-based tests.
+    let Ok(output) = Command::new("unzip").arg("-t").arg(&bundle).output() else {
+        return;
+    };
+    assert!(output.status.success());
+}
+
+#[test]
+fn the_three_zip_shapes_agree_byte_for_byte() {
+    let system = memory_project();
+    let source = Path::new("/proj");
+
+    let mut from_writer = Vec::new();
+    system.to_zip_writer(source, &mut from_writer).unwrap();
+    let from_vec = system.to_zip_vec(source).unwrap();
+    let mut from_stream = Vec::new();
+    system
+        .to_zip_stream(source)
+        .unwrap()
+        .read_to_end(&mut from_stream)
+        .unwrap();
+
+    assert_eq!(from_writer, from_vec);
+    assert_eq!(from_vec, from_stream);
+    assert!(entry_names(&from_vec).contains(&"README.md".to_owned()));
+}
+
+#[test]
+fn zip_methods_are_reachable_through_trait_objects() {
+    let owned = memory_project();
+    let borrowed: &dyn System = &owned;
+    let boxed: Box<dyn System> = Box::new(memory_project());
+
+    let from_borrowed = borrowed.to_zip_vec(Path::new("/proj")).unwrap();
+    let from_boxed = boxed.to_zip_vec(Path::new("/proj")).unwrap();
+
+    assert_eq!(entry_names(&from_borrowed), entry_names(&from_boxed));
+    assert_eq!(entry_bytes(&from_borrowed, "README.md"), b"hi\n");
+    assert_eq!(entry_bytes(&from_boxed, "src/main.rs"), b"fn main() {}\n");
+}
+
+#[test]
+fn a_type_with_only_the_required_methods_gains_the_zip_methods() {
+    let system = MinimalSystem {
+        inner: memory_project(),
+    };
+
+    let archive = system.to_zip_vec(Path::new("/proj")).unwrap();
+
+    assert!(entry_names(&archive).contains(&"src/main.rs".to_owned()));
+    assert_eq!(entry_bytes(&archive, "README.md"), b"hi\n");
+}
+
+#[test]
+fn real_temp_dir_archives_its_own_contents() {
+    let system = RealSystem::new();
+    let temp = system.create_temp_dir().unwrap();
+    system
+        .write(&temp.path().join("inside.txt"), b"kept")
+        .unwrap();
+
+    let mut archive = Vec::new();
+    temp.to_zip_stream()
+        .unwrap()
+        .read_to_end(&mut archive)
+        .unwrap();
+
+    assert_eq!(entry_names(&archive), vec!["inside.txt".to_owned()]);
+    assert_eq!(entry_bytes(&archive, "inside.txt"), b"kept");
+}
+
+#[test]
+fn memory_temp_dir_archives_its_own_contents() {
+    let system = MemorySystem::new();
+    let temp = system.create_temp_dir().unwrap();
+    system
+        .write(&temp.path().join("inside.txt"), b"kept")
+        .unwrap();
+
+    let mut archive = Vec::new();
+    temp.to_zip_stream()
+        .unwrap()
+        .read_to_end(&mut archive)
+        .unwrap();
+
+    assert_eq!(entry_names(&archive), vec!["inside.txt".to_owned()]);
+    assert_eq!(entry_bytes(&archive, "inside.txt"), b"kept");
+}
+
+#[test]
+fn a_handle_without_an_override_reports_unsupported() {
+    let handle = PlainTempDir {
+        path: PathBuf::from("/nowhere"),
+    };
+
+    let kind = handle.to_zip_stream().err().map(|error| error.kind());
+
+    assert_eq!(kind, Some(io::ErrorKind::Unsupported));
+}
+
+#[test]
+fn a_real_tree_round_trips_into_an_in_memory_filesystem() {
+    let real = RealSystem::new();
+    let temp = real.create_temp_dir().unwrap();
+    let root = temp.path().join("proj");
+    real.create_dir_all(&root.join("empty")).unwrap();
+    real.create_dir_all(&root.join("src")).unwrap();
+    real.write(&root.join("README.md"), b"hi\n").unwrap();
+    real.write(&root.join("src/main.rs"), b"fn main() {}\n")
+        .unwrap();
+
+    let mut stream = real.to_zip_stream(&root).unwrap();
+    let loaded = MemorySystem::from_zip_stream(&mut stream).unwrap();
+
+    assert_eq!(
+        loaded.read_to_string(Path::new("/README.md")).unwrap(),
+        "hi\n"
+    );
+    assert_eq!(
+        loaded.read_to_string(Path::new("/src/main.rs")).unwrap(),
+        "fn main() {}\n"
+    );
+    assert!(loaded.is_dir(Path::new("/empty")).unwrap());
+}
+
+#[test]
+fn a_loaded_filesystem_can_be_edited_and_archived_again() {
+    let source = memory_project();
+    let mut stream = source.to_zip_stream(Path::new("/proj")).unwrap();
+    let loaded = MemorySystem::from_zip_stream(&mut stream).unwrap();
+
+    loaded.remove_dir_all(Path::new("/target")).unwrap();
+    loaded.write(Path::new("/added.txt"), b"new").unwrap();
+
+    let republished = loaded.to_zip_vec(Path::new("/")).unwrap();
+
+    let names = entry_names(&republished);
+    assert!(names.contains(&"added.txt".to_owned()));
+    assert!(!names.contains(&"target/".to_owned()));
+    assert!(!names.contains(&"target/artifact.bin".to_owned()));
+    assert_eq!(entry_bytes(&republished, "src/main.rs"), b"fn main() {}\n");
+}
+
+#[test]
+fn an_unseekable_pipe_is_a_valid_source() {
+    let real = RealSystem::new();
+    let temp = real.create_temp_dir().unwrap();
+    let root = temp.path().join("proj");
+    real.create_dir_all(&root.join("src")).unwrap();
+    real.write(&root.join("README.md"), b"hi\n").unwrap();
+    real.write(&root.join("src/main.rs"), b"fn main() {}\n")
+        .unwrap();
+
+    let (mut reader, mut writer) = pipe().unwrap();
+    let producer = thread::spawn(move || {
+        RealSystem::new().to_zip_writer(&root, &mut writer).unwrap();
+        drop(writer);
+    });
+
+    let loaded = MemorySystem::from_zip_stream(&mut reader).unwrap();
+    producer.join().unwrap();
+
+    assert_eq!(
+        loaded.read_to_string(Path::new("/README.md")).unwrap(),
+        "hi\n"
+    );
+    assert_eq!(
+        loaded.read_to_string(Path::new("/src/main.rs")).unwrap(),
+        "fn main() {}\n"
+    );
+}
+
+#[test]
+fn an_entry_escaping_the_destination_is_refused() {
+    let mut buffer = Cursor::new(Vec::<u8>::new());
+    let mut writer = ZipWriter::new(&mut buffer);
+    writer
+        .start_file("../escape.txt", SimpleFileOptions::default())
+        .unwrap();
+    writer.write_all(b"nope").unwrap();
+    writer.finish().unwrap();
+
+    let mut source = Cursor::new(buffer.into_inner());
+    let result = MemorySystem::from_zip_stream(&mut source);
+
+    let message = result.err().map(|error| error.to_string()).unwrap();
+    assert!(message.contains("escapes the destination"));
+    assert!(message.contains("../escape.txt"));
+}
+
+#[test]
+fn bytes_that_are_not_an_archive_report_an_error() {
+    let mut source = Cursor::new(b"this is not a zip archive at all".to_vec());
+
+    assert!(MemorySystem::from_zip_stream(&mut source).is_err());
+}
